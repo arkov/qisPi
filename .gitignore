@@ -1,0 +1,4 @@
+.DS_Store
+test.js
+.idea/*
+node_modules/*
