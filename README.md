@@ -58,6 +58,11 @@ Because puppeteer doesn't work well with Chrom{e,ium} versions it is not automat
 - "DEGREE": The degree you are studying. It's the top level selection, at least at the LUH. Something like "Psychology Bachelor".
 - "STUDY_PROGRAM": The 2nd level selection, right before you see your grades overview. Hopefully this is not different at your university or else you would need to uncomment a little bit of code, should be easy enough.
 - "INTERVAL_MINUTES": The interval in minutes the script should check for new grades. I think 15 minutes is reasonable enough, you shouldn't use a smaller interval as the code is not optimized for that.
+<img width="535" alt="Degree/Study Program" src="https://user-images.githubusercontent.com/9944846/224445001-fdf48a2c-5c54-444a-9ec1-646be61d91c2.png">
+
+
 
 ### How-to exams.txt
 Use the PrfNr of the row in which your grade will be displayed.
+<img width="524" alt="Prfnr" src="https://user-images.githubusercontent.com/9944846/224444955-b9cd5dff-163c-4cbf-ac63-643b213ade39.png">
+
