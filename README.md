@@ -64,5 +64,7 @@ Because puppeteer doesn't work well with Chrom{e,ium} versions it is not automat
 
 ### How-to exams.txt
 Use the PrfNr of the row in which your grade will be displayed.
+
+
 <img width="524" alt="Prfnr" src="https://user-images.githubusercontent.com/9944846/224444955-b9cd5dff-163c-4cbf-ac63-643b213ade39.png">
 
