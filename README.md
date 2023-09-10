@@ -1,5 +1,6 @@
 ## What is this?
 This script scrapes your university's QIS page every set amount of minutes and notifies you via Telegram about the grades that got finally entered.
+I initially forked/modified the project by [friedPotat0](https://github.com/friedPotat0/QIS-Scraper), which helped me to get into JS/Puppeteer.
 
 The script itself is a Node.js script running inside a Docker container. Because it relies on the JS library Puppeteer together with Chromium in order to scrape the grades, you need a 64-Bit Raspberry Pi. Other than that, it should run anywhere you want and does so very reliably on my Raspberry Pi 4 8GB. I tried an afternoon implementing the script to work with Firefox in order to make it work with 32-Bit systems, but puppeteer behaves really badly with it. Firefox crashes due to CSP when traversing the site, but turning it off via `page.setBypassCSP(true)` crashes the script immediately - doesn’t seem to work with Firefox. Going the way with document.evaluate is quite cumbersome, so I set it aside.
 
@@ -41,6 +42,8 @@ If you want to contribute somehow or test something, please make sure to not tra
 # To-Do
 - The logging definetly needs improvement.
 - Firefox (for 32-Bit devices) would be great, but I don't think it's possible with puppeteer.
+- I'd like to allow others to use this, if they are willing to share their passwords which would be stored in the already working Redis instance. But this idea needs a lot more thought.
+- Make the Redis DB useful somehow else. Sessioning doesn't really help with anything thus far and the absolutely rudimentary usage of the DB is quite a shame. Will store EXAMS there, when I get to it.
 
 ## This will be needed for the future
 Because puppeteer doesn't work well with Chrom{e,ium} versions it is not automatically shipped with, those websites can help in the future to find the correct versions. Also helpful for local testing of the script on main machine.
