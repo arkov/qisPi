@@ -56,10 +56,12 @@ Because puppeteer doesn't work well with Chrom{e,ium} versions it is not automat
 - "DEGREE": The degree you are studying. It's the top level selection, at least at the LUH. Something like "Psychology Bachelor".
 - "STUDY_PROGRAM": The 2nd level selection, right before you see your grades overview. Hopefully this is not different at your university or else you would need to uncomment a little bit of code, should be easy enough.
 - "INTERVAL_MINUTES": The interval in minutes the script should check for new grades. Please try to be considerate and don't set it to less than 15 mins. I am confident that if you are using the script, you are not the only one and I don't want them to force Captcha or whatever upon us.
-  
+
+<img width="535" alt="study" src="https://github.com/arkov/qisPi/assets/9944846/acb74151-f66f-403b-bad4-c5159b9362af">
+
 
 ## How-to exams.txt
 Use the PrfNr of the row in which your grade will be displayed.
 
-
+<img width="524" alt="row" src="https://github.com/arkov/qisPi/assets/9944846/4f1d032c-98d1-4b1d-8438-0c8685c575e1">
 
