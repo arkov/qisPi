@@ -22,7 +22,9 @@ const {
 } = initializeGlobal();
 
 let EXAM_ID = []
-// check if file exists, if not, create it
+
+// check if file exists
+// TODO useless, will always be created so far to satisfy Docker build process. 
 if (!fs.existsSync('exams.txt')) console.log('!! exams.txt does not exist, will infer from QIS')
 else EXAM_ID = readFileSync('exams.txt', 'utf8') // Ignore PrfNr smaller than 1 digit, don't ask me why TODO
   .split('\n')
