@@ -1,0 +1,15 @@
+[Unit]
+Description=Podman container for qispi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/podman start -a qispi
+ExecStop=/usr/bin/podman stop -t 10 qispi
+Restart=always
+RestartSec=30s
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
