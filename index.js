@@ -445,7 +445,7 @@ async function getBrowser(CHROMIUM_PATH) {
                 '--disable-extensions',
             ],
             executablePath: CHROMIUM_PATH,   
-            headless: process.env['NO_HEADLESS'] ? false : true // use false for debugging
+            headless: process.env['NO_HEADLESS'] ? false : 'new' // use false for debugging
         })
         
         console.log(`!! browser PID: ${browser.process().pid}`)

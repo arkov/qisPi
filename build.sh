@@ -5,6 +5,9 @@ touch exams.txt # create empty file if not exists
 podman stop qispi
 podman rm qispi
 
+echo "This will take a while..."
+podman build -t qispi .
+
 # notice the create, not build/run!
 podman create --name=qispi \
 -e TZ=Europe/Berlin \

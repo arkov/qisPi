@@ -1,8 +1,8 @@
-FROM node:16-alpine3.16
+FROM node:16-alpine3.18
 
 RUN apk update && apk upgrade && \
     apk add --no-cache bash coreutils grep sed \
-      chromium \
+      chromium=115.0.5790.170-r0 \
       tzdata \
       nss \
       freetype \
@@ -19,7 +19,7 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 ENV NODE_PATH="/usr/local/share/.config/yarn/global/node_modules:${NODE_PATH}"
 
-RUN yarn global add puppeteer@14.0 telegraf redis
+RUN yarn global add puppeteer@21.0.2 telegraf redis
 RUN yarn install
 
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
