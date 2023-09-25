@@ -1,6 +1,6 @@
 #!/bin/sh
 
-touch exams.txt # create empty file if not exists
+# touch exams.txt # create empty file if not exists
 
 podman stop qispi
 podman rm qispi
@@ -12,7 +12,7 @@ podman build -t qispi .
 podman create --name=qispi \
 -e TZ=Europe/Berlin \
 -v $(pwd)/index.js:/usr/src/app/index.js:ro \
--v $(pwd)/exams.txt:/usr/src/app/exams.txt \
+# -v $(pwd)/exams.txt:/usr/src/app/exams.txt \
 -v $(pwd)/config.json:/usr/src/app/config.json \
 -v $(pwd)/redis.conf:/usr/local/etc/redis/redis.conf:ro \
 --init qispi
