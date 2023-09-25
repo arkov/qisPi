@@ -1,49 +1,51 @@
 'use strict';
+
 const assert = require('assert').strict;
 const puppeteer = require('puppeteer');
 const { Telegraf, Markup, session  } = require('telegraf');
-const { createClient } = require('redis');
-const fs = require('fs');
-const readFileSync = fs.readFileSync;
-const writeFileSync = fs.writeFileSync;
-const OK = 'OK'; // todo
 
+const db = require('better-sqlite3')('qispi.db', { verbose: (verbose) => {console.log('SQL: ', verbose)} });
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+if (process.env['START_CLEAN']) {
+    console.log('!! START_CLEAN: Dropping tables')
+    db.prepare('DROP TABLE IF EXISTS subjects').run();
+    db.prepare('DROP TABLE IF EXISTS users').run();
+    db.prepare('DROP TABLE IF EXISTS ignoredsubjects').run();
+}
+
+const {readFileSync} = require('fs');
+
+const OK = 'OK'; // todo
 const DEBUG = process.env['DEBUG']
 console.log('!! DEBUG: ', DEBUG)
-const CHROMIUM_PATH = process.env['CHROMIUM_PATH'] ? process.env['CHROMIUM_PATH'] : '/usr/bin/chromium-browser'
-console.log('!! Using CHROMIUM_PATH: ', CHROMIUM_PATH)
-
-const client =  createClient();
-client.on('error', err => console.log('Redis Client Error', err));
-client.connect();
+const CHROMIUM_PATH = process.env['CHROMIUM_PATH']
+console.log('!! Using CHROMIUM_PATH: ', CHROMIUM_PATH ? CHROMIUM_PATH : 'default')
 
 const {
-    QIS_PASSWORD, QIS_USER, CHAT_ID, BOT_TOKEN, DEGREE, INTERVAL_SECONDS, STUDY_PROGRAM
+    QIS_PASSWORD, QIS_USER, CHAT_ID, BOT_TOKEN, DEGREE, INTERVAL_SECONDS, STUDY_PROGRAM, SECRET
 } = initializeGlobal();
 
-let EXAM_ID = []
+let lastheartbeat = -1; // todo either remove or utilize sqlite
 
-// check if file exists
-// TODO useless, will always be created so far to satisfy Docker build process. 
-if (!fs.existsSync('exams.txt')) console.log('!! exams.txt does not exist, will infer from QIS')
-else EXAM_ID = readFileSync('exams.txt', 'utf8') // Ignore PrfNr smaller than 1 digit, don't ask me why TODO
-  .split('\n')
-  .filter(i => i && i.length >= 1)
-
-let lastheartbeat = -1;
+db.prepare('CREATE TABLE IF NOT EXISTS users (chatid INTEGER PRIMARY KEY, pinned INTEGER, name TEXT)').run();
+db.prepare('CREATE TABLE IF NOT EXISTS subjects (chatid INTEGER KEY, prfnr TEXT KEY, FOREIGN KEY (chatid) references users (chatid), UNIQUE(chatid, prfnr))').run(); // integer might not be enough, but also a mess to handle. not worth it to me
+db.prepare('CREATE INDEX IF NOT EXISTS chatid_index ON subjects (chatid)').run();
 
 const bot = initializeBot(BOT_TOKEN);
-setTimeout( () => { // ugly but whatever. bot might not be ready yet. and wanted to keep bot const for fun.
-    checkQIS(false)
+setTimeout( () => { // ugly but whatever. bot might not be ready yet. and wanted to keep bot const for fun, otherweise initBot().then...
+    checkQIS(CHAT_ID, false)
     start(INTERVAL_SECONDS)
 }, 5 * 1000)
 
-async function checkQIS(upd) {
-    try {   
-        let {browser, page} = await getBrowser(CHROMIUM_PATH)
+async function checkQIS(CHAT_ID, upd = false) {
+    let browser, page // keep it in scope so catch can close.
+    try {
+        ({browser, page} = await getBrowser(CHROMIUM_PATH))
 
-        await getToTable(page)
-        const {subjects, update} = await getSubjects(page)
+        await getToTable(browser, page).catch(e => console.log('!!! ', e.stack, "Issue with getToTable()"))
+
+        const {subjects, update} = await getSubjectsFromTable(page)
         
         browser = await closeBrowser(browser).then( success => {
             if (success) {
@@ -62,9 +64,10 @@ async function checkQIS(upd) {
         if (update !== OK) console.log(`!!! ${getLogTime()} Update not OK: ${update}`)
         let { message, miscexams } = processSubjects(subjects)
             
-        let lookingformsg = "Looking for:\n" + EXAM_ID.map(prf => {
-            return subjects[prf] ? `${prf}: ${subjects[prf].title}` : `${prf}: not found`;
-        }).join("\n");
+        let lookingformsg = "Looking for:\n" 
+        + getSubjects(CHAT_ID).map(prf => {
+                return subjects[prf] ? `${prf}: ${subjects[prf].title}` : `${prf}: not found`;
+            }).join("\n");
         
         // upd = true if update was requested by user, thus send verbose message
         if (upd) {
@@ -74,10 +77,8 @@ async function checkQIS(upd) {
         else if (message.length > 0) await sendMessage(CHAT_ID, message)
                 
         heartbeat(CHAT_ID).catch(e => console.log('!!! ', e.stack, "Issue with heartbeat"))
-        
-        if (!DEBUG) writeFileSync('exams.txt', EXAM_ID.join('\n')); // Append and remove exams. IF DEBUG, don't write to file
 
-        if (EXAM_ID.length === 0) { // todo check whether rest of exams are all junk
+        if (getSubjects(CHAT_ID).length === 0) { // todo check whether rest of exams are all junk
             console.log("!! Alle Klausuren wurden eingetragen.")
             sendMessage(CHAT_ID, "Alle Klausuren wurden eingetragen!")
             process.exit(0)
@@ -96,8 +97,8 @@ async function checkQIS(upd) {
  */
 async function heartbeat(chatid) {
     if (DEBUG) return;
-    if (!bot) console.log('!!! Bot is undefined in heartbeat')
-    let pinned = await client.hGet(String(chatid), 'pinned')
+
+    let pinned = getPinnedMessage(chatid)
     if (!pinned) {
         console.error('No pinned message found')
         sendMessage(chatid, 'No pinned message found, please hit /start')
@@ -112,7 +113,7 @@ async function heartbeat(chatid) {
             "Last updated: " + getTime()
         );
         
-        console.log(`!! ${getLogTime()} Heartbeat sent`);
+        console.log(`!! ${getLogTime()} Heartbeat sent to ${chatid} via ${pinned}`);
     }
 }
 
@@ -167,10 +168,12 @@ async function closeBrowser(browserInstance) {
  */
 function initializeGlobal() {
     const config = JSON.parse(readFileSync('./config.json', 'utf-8'));
-    ['QIS_PASSWORD', 'QIS_USER', 'BOT_TOKEN', 'DEGREE', 'INTERVAL_MINUTES', 'STUDY_PROGRAM'] // CHAT_ID
+    ['QIS_PASSWORD', 'QIS_USER', 'BOT_TOKEN', 'DEGREE', 'INTERVAL_MINUTES', 'STUDY_PROGRAM', 'CHAT_ID']
         .forEach(key => assert(config[key] !== undefined, `Missing key ${key}`))
 
+    config['SECRET'] = config['SECRET'] || 'secret'
     config['INTERVAL_SECONDS'] = config['INTERVAL_MINUTES'] * 60;
+    config['CHAT_ID'] = Number(config['CHAT_ID'])
     return config;
 }
 
@@ -185,52 +188,47 @@ function initializeBot(BOT_TOKEN) {
     bot.start((ctx) => {
         (async () => {
             console.log(`!! ${getLogTime()} ${ctx.message.from.username} started the bot`)
+            if (ctx.message.chat.id !== CHAT_ID && (ctx.message.text !== SECRET || ctx.message.text === 'secret')) return ctx.reply('You are not authorized to use this bot.') // dont know + wrong password
+            
             // it seems to be quite a brute-force approach that fails if there are no pinned messages. try-catch is the only way to go
-            if (ctx.message.chat.id !== CHAT_ID) {}
-            await bot.telegram.unpinAllChatMessages(CHAT_ID).catch((e) => console.log("!!! ", e.stack, "Unpinning failed"))
-            await ctx.reply('Welcome! Write \'update\' to get started or press the big button below!', 
+            await bot.telegram.unpinAllChatMessages(CHAT_ID)
+            .then(() => console.log(`!! ${getLogTime()} Unpinned all messages`))
+            .catch((e) => console.log("!!! ", e.stack, "Unpinning failed"))
+
+            await ctx.reply('Welcome! Write \'update\' to get started or press the big button below! Otherwise, write \'add\' or \'del\' followed by the Number of the exam to add or delete exams to track. \n\n',
                 Markup.keyboard([['🔍 Update']]).resize()
             )
             let message = await ctx.reply('Last updated: not yet 😶')
             
             bot.telegram.pinChatMessage(ctx.message.chat.id, message.message_id)
-            await client.hSet(
-                String(ctx.message.chat.id), 
-                {
-                    pinned: message.message_id
-                }
-            )
-            await checkQIS(false)    
+            
+            let out = db.prepare('INSERT OR REPLACE INTO users (chatid, pinned, name) VALUES (@chatid, @pinned, @name)').run({chatid: ctx.message.chat.id, pinned: message.message_id, name: ctx.message.from.username}); // todo
+            console.log('!! Trying to insert user -- again? ', out.changes > 0)
+            await checkQIS(CHAT_ID, false)    
         })();
     })
 
     bot.on('message', (ctx, next) => {
         console.log(`!! ${getLogTime()} ${ctx.message.from.username} sent a message`);
-        next();
+        if (ctx.message.chat.id !== CHAT_ID && (ctx.message.text !== SECRET || ctx.message.text === 'secret')) return ctx.reply('You are not authorized to use this bot.') // dont know + wrong password
+        if (db.prepare('SELECT * FROM users WHERE chatid = @chatid').get({chatid: ctx.message.chat.id}) === undefined) ctx.reply('boohoo i dont know you')
+        else next();
     })
 
     bot.hears('hi', (ctx) => ctx.reply('Hey there 👋'))
     
-    bot.hears(new RegExp('delete'), (ctx, next) => {
-        let str = ctx.message.text.split('delete')[1].trim()
-        if (EXAM_ID.indexOf(str) >= 0) {
-            EXAM_ID.splice(EXAM_ID.indexOf(str), 1)
-            ctx.reply(`Deleted ${str}`)
-        } else {
-            ctx.reply(`Could not find ${str}`)
-        }
-        next();
+    bot.hears(/^del/, (ctx, next) => {
+        let splits = ctx.message.text.split(/del\w*\s*/)
+        if (splits.length < 2 || !splits[1]) return ctx.reply('Malformatted request. Please write \'del\' followed by the PrfNr of the exam you want to remove, i.e. \'del 123\', seperated by a space and without the quotes.')
+        ctx.reply(removeSubjects(ctx.message.chat.id, splits[1].trim()))
+        // next();
     })
     
-    bot.hears(new RegExp('add'), (ctx, next) => {
-        let str = ctx.message.text.split('add')[1].trim()
-        if (EXAM_ID.indexOf(str) < 0) {
-            EXAM_ID.push(str)
-            ctx.reply(`Added ${str}`)
-        } else {
-            ctx.reply(`Already in list`)
-        }
-        next();
+    bot.hears(/^add/, (ctx, next) => {
+        let splits = ctx.message.text.split(/add\w*\s*/)
+        if (splits.length < 2 || !splits[1]) return ctx.reply('Malformatted request. Please write \'add\' followed by the PrfNr of the exam you want to add, i.e. \'add 123\', without the quotes.')
+        ctx.reply(addSubjects(ctx.message.chat.id, splits[1].trim()))
+        // next();
     })
     
     bot.on('message', (ctx, next) => {
@@ -245,13 +243,14 @@ function initializeBot(BOT_TOKEN) {
         ctx => {
             ctx.reply('Coming right up')
             console.log(`!! Update requested at ${getTime()}`)
-            checkQIS(true)
+            checkQIS(CHAT_ID, true)
         }    
     )
 
     if (!DEBUG) {
         console.log('!! Launching bot')
         bot.launch() // even though async, it never resolves!
+        
         
         process.once('SIGINT', () => bot.stop('SIGINT'))
         process.once('SIGTERM', () => bot.stop('SIGTERM'))
@@ -272,14 +271,15 @@ function initializeBot(BOT_TOKEN) {
  */
 async function start(INTERVAL_SECONDS) {
     assert (INTERVAL_SECONDS > 60, "Interval_SECONDS must be more than 60 seconds, otherwise you will not have a fun time.")
+    console.log(`!! ${getLogTime()} Starting interval Interval: ${INTERVAL_SECONDS}`)
+
     setInterval(() => {
-        console.log(`!! ${getLogTime()} Starting interval Interval: ${INTERVAL_SECONDS}`)
         let date = new Date();
         let hour = date.getHours();
         
         if (hour >= 6 && hour <= 22) {
             console.log(`!! running (${getLogTime()}) ...`);
-            checkQIS(false);
+            checkQIS(CHAT_ID, false);
         } else {
             console.log(`!! sleeping (${getLogTime()}) ...`);
         }
@@ -300,9 +300,9 @@ function getLogTime() {
  * Outsources the page traversal to a separate function
  * @param {puppeteer.Page} page 
  */
-async function getToTable(page) {
+async function getToTable(browser, page) {
     try {
-        await page.goto('https://qis.verwaltung.uni-hannover.de/', { waitUntil: 'networkidle0'}) // TODO
+        await page.goto('https://qis.verwaltung.uni-hannover.de/', { waitUntil: 'networkidle0'}) // networkidle didnt work on Firefox
         //  Login
         await page.type('input#asdf.input_login', QIS_USER)
         await page.type('input#fdsa.input_login', QIS_PASSWORD)
@@ -326,8 +326,9 @@ async function getToTable(page) {
 
         await page.waitForXPath(`//table`)
     } catch(e) {
-        console.log("Issue with page traversal", e.stack)
+        console.log("!!! Issue with page traversal", e.stack)
         closeBrowser(browser);
+        return Error("Issue with page traversal")
     }
 }
 
@@ -336,7 +337,7 @@ async function getToTable(page) {
  * @param {puppeteer.Browser} page 
  * @returns {Object} {subjects: {key: {title, grade, state}}, update: "OK"} If all goes fine.
  */
-async function getSubjects(page) {
+async function getSubjectsFromTable(page) {
     assert(page, "Page is undefined")
     return await page.$$eval('tbody', (t) => {
         /**
@@ -377,7 +378,7 @@ async function getSubjects(page) {
 
 /**
  * 
- * @param {Object} subjects from the 'tbody' of QIS (getSubjects()) 
+ * @param {Object} subjects from the 'tbody' of QIS (getSubjectsFromTable()) 
  * @returns {Object} {message: string, miscexams: string} 
  * message is the noteworthy message with at least one explicit update to be sent to the user on our own.
  * miscexams is a sanity check to see whether the bot is working and spits out all exams (among them are angemeldet and so on). used when user requests an update themselves.
@@ -385,7 +386,7 @@ async function getSubjects(page) {
 function processSubjects(subjects) {
     let message = ""
     let miscexams = "" // sanity check to check whether bot is working, spits out all + angemeldet exams
-    
+
     Object.keys(subjects).forEach( key => {
         /**
          * @param state: [angemeldet, bestanden, nicht bestanden, nicht erschienen, verschoben]
@@ -394,14 +395,15 @@ function processSubjects(subjects) {
          */
         let subject = subjects[key]
         // Exam not in list yet
-        if (EXAM_ID.indexOf(key) < 0) {
+
+        if (getSubjects(CHAT_ID).indexOf(key) < 0) {
             if (subject.state === 'angemeldet') {
-                EXAM_ID.push(key);
+                addSubjects(CHAT_ID, key);
             }
             // else continue; // Only interested in 'unseen' exams that are angemeldet
         }
         // Exam in list
-        else if (EXAM_ID.indexOf(key) >= 0) {
+        else if (getSubjects(CHAT_ID).indexOf(key) >= 0) {
             switch(subject.state) { // So far, we only distinct between angemeldet (still need to track further) and everything else (can be deleted, no more tracking)
                 case 'angemeldet':
                     miscexams += `${subject.title}:\n${subject.state}\n\n`;
@@ -409,12 +411,12 @@ function processSubjects(subjects) {
 
                 default: {
                     message += `${subject.title}:\n` + ((subject.grade.length) > 0 ? `${subject.grade} ` : '') + `${subject.state}\n\n`
-                    EXAM_ID.splice(EXAM_ID.indexOf(key), 1); // safe to delete now
+                    removeSubjects(CHAT_ID, key) // safe to delete now
                     break;
                 }
             }
         } 
-        else console.log(`Something went severly wrong with ${key} and ${subject}`)
+        else console.log(`!!! Something went severly wrong with ${key} and ${subject}`)
     })
     console.log(`!! Processed ${Object.keys(subjects).length} subjects`)
     return {message: message, miscexams: miscexams}
@@ -444,7 +446,7 @@ async function getBrowser(CHROMIUM_PATH) {
                 '--single-process',
                 '--disable-extensions',
             ],
-            executablePath: CHROMIUM_PATH,   
+            executablePath: CHROMIUM_PATH, // No default setting if C_P not set
             headless: process.env['NO_HEADLESS'] ? false : 'new' // use false for debugging
         })
         
@@ -459,7 +461,89 @@ async function getBrowser(CHROMIUM_PATH) {
         });
         return {browser: browser, page: page}
     } catch(e){
-        console.log(e.stack, "Issue with browser")
+        console.log('!!! ', e.stack, "Issue with browser")
         closeBrowser(browser);
     }
 }
+
+/**
+ * could make async
+ * @param {*} chatid 
+ * @param {*} prfnr 
+ * @returns 
+ */
+function addSubjects(chatid, prfnr) {
+    if (prfnr === undefined || chatid  === undefined) return console.log(`!!! ${getLogTime()} prfnr is undefined in addSubjects()`) // Returning console.log looks stupid but whatever
+    if (['number', 'string'].includes(typeof prfnr)) prfnr = [prfnr]
+    
+    return prfnr.map(
+        prfnr => {
+            let success = db.prepare('INSERT OR IGNORE INTO subjects (chatid, prfnr) VALUES (@chatid, @prfnr)').run({chatid, prfnr}).changes
+            if (success > 0) return "Added " + prfnr
+            else return "Already looking for " + prfnr
+        }
+    ).join("\n")
+    // db.prepare('INSERT INTO subjects VALUES (@chatid, @prfnr)').run({chatid, prfnr})
+}
+
+/**
+ * Gets subjects associated with CHATID from table. Terrible naming, as getSubjectsFromTable() is a function as well. TODO
+ * Sqlite infers chatid well from string or number, only the other way around is not the case in the rest of the code.
+ * @param {string, number} chatid 
+ * @returns [number, string] // Todo
+ */
+function getSubjects(chatid) {
+    return db.prepare('SELECT * FROM subjects WHERE chatid = @chatid').all({chatid}).map( row => row.prfnr)
+}
+
+/**
+ * 
+ * @param {number} chatid 
+ * @returns {number} message_id of pinned message
+ */
+function getPinnedMessage(chatid) {
+    return db.prepare('SELECT pinned FROM users WHERE chatid = @chatid').get({chatid}).pinned
+}
+
+/**
+ * TODO
+ * @param {number} chatid 
+ * @param {string, number} prfnr 
+ * @returns 
+ */
+function removeSubjects(chatid, prfnr) {
+    if (prfnr === undefined || chatid  === undefined) return console.log(`!!! ${getLogTime()} prfnr is undefined in removeSubjects()`)
+    if (['number', 'string'].includes(typeof prfnr)) prfnr = [prfnr]
+
+    return prfnr.map(
+        prfnr => {
+            let success = db.prepare('DELETE FROM subjects WHERE chatid = @chatid AND prfnr = @prfnr').run({chatid, prfnr})
+            if (success > 0) return "Deleted " + prfnr
+            else return "Couldn't find " + prfnr
+        }
+    ).join("\n")
+}
+
+
+/**
+ * TODO WIP wanted to apply some form of partial function, but it's a hassle as well
+ * Update row for primary key in specified table (all tables have one key in my case)
+ * @param {string} table 
+ * @param {string} pk 
+ * @param  {string} values 
+ * @returns 
+ */
+// async function upsert(table, pk, ...values) {
+//     let alldefined = arguments.reduce((prev, cur) => prev && (cur !== undefined), true);
+//     if (!alldefined) console.log(`!!! ${getLogTime()} Not all arguments defined in upsert(). table: ${table}, pk: ${pk}, values: ${values}`)
+    
+//     if (typeof values === 'string') values = [values]
+//     let upsert = `INSERT INTO ${table} 
+//     VALUES (${values.map( () => '?').join(', ')})
+//     ON CONFLICT (${pk})
+//     DO UPDATE SET ${values.map((v, _) => `${v} = excluded.${v}`).join(', ')};`
+//     return await db.prepare(upsert).run(values)
+// }
+
+
+
