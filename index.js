@@ -1,4 +1,6 @@
-'use strict';
+'use strict'
+
+const SIGNED_UP = ['angemeldet']
 
 const puppeteer = require('puppeteer');
 const assert = require('assert').strict;
@@ -31,7 +33,7 @@ let lastheartbeat = -1; // todo either remove or utilize sqlite
 db.prepare('CREATE TABLE IF NOT EXISTS users (chatid INTEGER PRIMARY KEY, pinned INTEGER, name TEXT)').run();
 db.prepare('CREATE TABLE IF NOT EXISTS subjects (chatid INTEGER KEY, prfnr TEXT KEY, FOREIGN KEY (chatid) references users (chatid), UNIQUE(chatid, prfnr))').run(); // integer might not be enough, but also a mess to handle. not worth it to me
 db.prepare('CREATE INDEX IF NOT EXISTS chatid_index ON subjects (chatid)').run();
-
+db.prepare('CREATE TABLE IF NOT EXISTS reportcard (chatid INTEGER PRIMARY KEY, prfnr TEXT, grade TEXT, state TEXT, FOREIGN KEY (chatid))').run(); // here we save all exam states. as soon as there exists a delta, we send a message to the user.
 const bot = initializeBot(BOT_TOKEN);
 setTimeout( () => { // ugly but whatever. bot might not be ready yet. and wanted to keep bot const for fun, otherweise initBot().then...
     checkQIS(CHAT_ID, false)
@@ -41,10 +43,10 @@ setTimeout( () => { // ugly but whatever. bot might not be ready yet. and wanted
 async function checkQIS(CHAT_ID, upd = false) {
     let browser, page // keep it in scope so catch can close.
     try {
-        ({browser, page} = await getBrowser(CHROMIUM_PATH))
+        ({browser, page} = await getBrowser(CHROMIUM_PATH));
 
-        await getToTable(page)
-        const {subjects, update} = await getSubjectsFromTable(page)
+        await getToTable(page);
+        const {subjects, update} = await getSubjectsFromTable(page);
         
         browser = await closeBrowser(browser).then( success => {
             if (success) {
@@ -60,13 +62,16 @@ async function checkQIS(CHAT_ID, upd = false) {
             return null;  
         });
         
-        if (update !== OK) console.log(`!!! ${getLogTime()} Update not OK: ${update}`)
-        let { message, miscexams } = processSubjects(subjects)
+        if (update !== OK) console.log(`!!! ${getLogTime()} Update not OK: ${update}`);
+        let { message, miscexams } = processSubjects(subjects);
             
         let lookingformsg = "Looking for:\n" 
-        + getSubjects(CHAT_ID).map(prf => {
-                return subjects[prf] ? `${prf}: ${subjects[prf].title}` : `${prf}: not found`;
-            }).join("\n");
+            + getSubjects(CHAT_ID)
+                .map(prf => {
+                    return subjects[prf] ? `${prf}: ${subjects[prf].title}` : `${prf}: not found.`;
+                }).join("\n");
+        
+        
         
         // upd = true if update was requested by user, thus send verbose message
         if (upd) {
@@ -377,6 +382,16 @@ async function getSubjectsFromTable(page) {
 
 /**
  * 
+ * @param {string} state The state of the exam taken from QIS. For example: angemeldet
+ * @returns 
+ */
+function isSignedUp(state) {
+    return SIGNED_UP.includes(state)
+}
+
+
+/**
+ * 
  * @param {Object} subjects from the 'tbody' of QIS (getSubjectsFromTable()) 
  * @returns {Object} {message: string, miscexams: string} 
  * message is the noteworthy message with at least one explicit update to be sent to the user on our own.
@@ -397,17 +412,17 @@ function processSubjects(subjects) {
         // Exam not in list yet
 
         if (currentsubjects.indexOf(key) < 0) {
-            if (subject.state === 'angemeldet') {
+            if (isSignedUp(subject.state)) {
                 addSubjects(CHAT_ID, key);
             }
             // else continue; // Only interested in 'unseen' exams that are angemeldet
         }
         // Exam in list
-        else if (currentsubjects.indexOf(key) >= 0) {
+        else if (currentsubjects.indexOf(key) >= 0 || getSubjects(CHAT_ID).indexOf(key) >= 0) { // try not to look up table all the time
             switch(subject.state) { // So far, we only distinct between angemeldet (still need to track further) and everything else (can be deleted, no more tracking)
-                case 'angemeldet':
+                case SIGNED_UP[0]: // todo wrt to SIGNED_UP variable above
                     miscexams += `${subject.title}:\n${subject.state}\n\n`;
-                break;
+                    break;
 
                 default: {
                     message += `${subject.title}:\n` + ((subject.grade.length) > 0 ? `${subject.grade} ` : '') + `${subject.state}\n\n`
@@ -415,7 +430,14 @@ function processSubjects(subjects) {
                     break;
                 }
             }
-        } 
+        }
+        
+        // We might have an exam grade posted, even though it never got formally signed-up on/announced.
+        // In that case, we spurt out the grade if it never had been seen before and 
+        // else if (subject.state !== 'angemeldet') {
+        //     addSubjects(CHAT_ID, key);
+        // }
+        
         else console.log(`Something went severly wrong with ${key} and ${subject}`)
     })
     console.log(`!! Processed ${Object.keys(subjects).length} subjects`)
@@ -485,8 +507,12 @@ function addSubjects(chatid, prfnr) {
     // db.prepare('INSERT INTO subjects VALUES (@chatid, @prfnr)').run({chatid, prfnr})
 }
 
+function fillReportCard(subjects) {
+    return 0;
+}
+
 /**
- * Gets subjects associated with CHATID from table. Terrible naming, as getSubjectsFromTable() is a function as well. TODO
+ * Gets subjects associated with CHATID from database. Terrible naming, as getSubjectsFromTable() is a function as well. TODO
  * @param {string, number} chatid 
  * @returns [number, string] // todo
  */
