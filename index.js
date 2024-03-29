@@ -31,9 +31,10 @@ const {
 let lastheartbeat = -1; // todo either remove or utilize sqlite
 
 db.prepare('CREATE TABLE IF NOT EXISTS users (chatid INTEGER PRIMARY KEY, pinned INTEGER, name TEXT)').run();
-db.prepare('CREATE TABLE IF NOT EXISTS subjects (chatid INTEGER KEY, prfnr TEXT KEY, FOREIGN KEY (chatid) references users (chatid), UNIQUE(chatid, prfnr))').run(); // integer might not be enough, but also a mess to handle. not worth it to me
+db.prepare('CREATE TABLE IF NOT EXISTS subjects (chatid INTEGER, prfnr TEXT, FOREIGN KEY (chatid) references users (chatid), UNIQUE(chatid, prfnr), PRIMARY KEY (chatid, prfnr))').run(); // integer might not be enough, but also a mess to handle. not worth it to me
+db.prepare('CREATE TABLE IF NOT EXISTS reportcard (chatid INTEGER, prfnr TEXT, title TEXT, state TEXT, grade TEXT, FOREIGN KEY (chatid) references users (chatid), PRIMARY KEY (chatid, prfnr))').run(); // here we save all exam states. as soon as there exists a delta, we send a message to the user.
 db.prepare('CREATE INDEX IF NOT EXISTS chatid_index ON subjects (chatid)').run();
-db.prepare('CREATE TABLE IF NOT EXISTS reportcard (chatid INTEGER PRIMARY KEY, prfnr TEXT, grade TEXT, state TEXT, FOREIGN KEY (chatid))').run(); // here we save all exam states. as soon as there exists a delta, we send a message to the user.
+
 const bot = initializeBot(BOT_TOKEN);
 setTimeout( () => { // ugly but whatever. bot might not be ready yet. and wanted to keep bot const for fun, otherweise initBot().then...
     checkQIS(CHAT_ID, false)
@@ -48,7 +49,7 @@ async function checkQIS(CHAT_ID, upd = false) {
         await getToTable(page);
         const {subjects, update} = await getSubjectsFromTable(page);
         
-        browser = await closeBrowser(browser).then( success => {
+        browser = closeBrowser(browser).then( success => {
             if (success) {
                 console.log(`!! Browser closed succesfully in checkQIS()`)
                 browser = null;
@@ -63,10 +64,14 @@ async function checkQIS(CHAT_ID, upd = false) {
         });
         
         if (update !== OK) console.log(`!!! ${getLogTime()} Update not OK: ${update}`);
-        let { message, miscexams } = processSubjects(subjects);
+        let processedsubjs = processSubjects(subjects); // todo 
+        let exams = processedsubjs.message; // todo improve
+        let miscexams = processedsubjs.miscexams;
+
+        let message = processGrades(subjects);
             
         let lookingformsg = "Looking for:\n" 
-            + getSubjects(CHAT_ID)
+            + getSubjectsDB(CHAT_ID)
                 .map(prf => {
                     return subjects[prf] ? `${prf}: ${subjects[prf].title}` : `${prf}: not found.`;
                 }).join("\n");
@@ -74,19 +79,22 @@ async function checkQIS(CHAT_ID, upd = false) {
         
         
         // upd = true if update was requested by user, thus send verbose message
+        // using old payload of messages (through subjects, instead of grades)
         if (upd) {
-            let verboseupdate = message + miscexams.trim() + "\n\n" + lookingformsg.trim() // Concrete update (bestanden, etc) + miscexams (angemeldet) +  Looking for: (PrfNr: Title) 
+            console.log('exams:', exams)
+            let verboseupdate = exams + miscexams.trim() + "\n\n" + lookingformsg.trim(); // Concrete update (bestanden, etc) + miscexams (angemeldet) +  Looking for: (PrfNr: Title) 
+            verboseupdate += "\n\n" + message.trim(); // todo showrtwhile change
             await sendMessage(CHAT_ID, verboseupdate)
         }
         else if (message.length > 0) await sendMessage(CHAT_ID, message)
                 
         heartbeat(CHAT_ID).catch(e => console.log('!!! ', getLogTime(), e.stack, "Issue with heartbeat"))
 
-        if (getSubjects(CHAT_ID).length === 0) { // todo check whether rest of exams are all junk
-            console.log(`!! ${getLogTime()} Alle Klausuren wurden eingetragen.`)
-            sendMessage(CHAT_ID, "Alle Klausuren wurden eingetragen!")
-            process.exit(0)
-        }
+        // if (getSubjectsDB(CHAT_ID).length === 0) { // todo check whether rest of exams are all junk
+        //     console.log(`!! ${getLogTime()} Alle Klausuren wurden eingetragen.`)
+        //     sendMessage(CHAT_ID, "Alle Klausuren wurden eingetragen!")
+        //     process.exit(0)
+        // }
 
     } catch(e) {
         console.log(`!!! ${getLogTime()} Issue with checkQIS() `, e.stack)
@@ -150,21 +158,26 @@ function getTime() {
 async function closeBrowser(browserInstance) {
     if (browserInstance) {
         console.log(`!! ${getLogTime()} Attempting browser.close()`);
-        
-        let result = await Promise.race([
-            browserInstance.close().then(() => 'closed'),
-            new Promise(resolve => setTimeout(() => resolve('timeout'), 5 * 60 * 1000))
-        ]);
 
-        if (result === 'closed') {
-            console.log(`!! ${getLogTime()} Browser closed successfully`);
-            return true;  // Indicate successful closure
-        } else {
-            console.log(`!!! ${getLogTime()} Timeout reached while trying to close browser`);
-            return false; // Indicate unsuccessful closure
+        try {
+            let result = await Promise.race([
+                browserInstance.close().then(() => 'closed'),
+                new Promise(resolve => setTimeout(() => resolve('timeout'), 5 * 60 * 1000)) // 5 minutes timeout
+            ]);
+
+            if (result === 'closed') {
+                console.log(`!! ${getLogTime()} Browser closed successfully`);
+                return true;
+            } else {
+                console.log(`!!! ${getLogTime()} Timeout reached or error occurred while trying to close browser`);
+                return false;
+            }
+        } catch (error) {
+            console.log(`!!! ${getLogTime()} Error closing browser: ${error}`);
+            return false;
         }
     }
-    return true;  // Indicate no browser instance to close
+    return true;  // no browser instance to close or already closed
 }
 
 /**
@@ -362,6 +375,7 @@ async function getSubjectsFromTable(page) {
             if (!(rows[i] && rows[i].cells)) continue; // todo
             if (rows[i].cells.length < 11) continue;
             if (rows[i].cells[5].innerText.length < 1) continue; // todo
+            if (rows[i].cells[2].innerText.length < 1) continue; // todo, LUH specific. Hier steht die Pruefungsart - falls leer, ist es nicht das Modul selbst, sondern Kompetenzbereich usw.
             /**
             * @param 0: PrfNr
             * @param 1: Title of exam
@@ -400,7 +414,7 @@ function isSignedUp(state) {
 function processSubjects(subjects) {
     let message = ""
     let miscexams = "" // sanity check to check whether bot is working, spits out all + angemeldet exams
-    let currentsubjects = getSubjects(CHAT_ID);
+    let currentsubjects = getSubjectsDB(CHAT_ID); // [prfnr1, prfnr2, ...]
 
     Object.keys(subjects).forEach( key => {
         /**
@@ -410,7 +424,7 @@ function processSubjects(subjects) {
          */
         let subject = subjects[key]
         // Exam not in list yet
-
+        
         if (currentsubjects.indexOf(key) < 0) {
             if (isSignedUp(subject.state)) {
                 addSubjects(CHAT_ID, key);
@@ -418,7 +432,7 @@ function processSubjects(subjects) {
             // else continue; // Only interested in 'unseen' exams that are angemeldet
         }
         // Exam in list
-        else if (currentsubjects.indexOf(key) >= 0 || getSubjects(CHAT_ID).indexOf(key) >= 0) { // try not to look up table all the time
+        else if (currentsubjects.indexOf(key) >= 0 || getSubjectsDB(CHAT_ID).indexOf(key) >= 0) { // try not to look up table all the time
             switch(subject.state) { // So far, we only distinct between angemeldet (still need to track further) and everything else (can be deleted, no more tracking)
                 case SIGNED_UP[0]: // todo wrt to SIGNED_UP variable above
                     miscexams += `${subject.title}:\n${subject.state}\n\n`;
@@ -438,11 +452,75 @@ function processSubjects(subjects) {
         //     addSubjects(CHAT_ID, key);
         // }
         
-        else console.log(`Something went severly wrong with ${key} and ${subject}`)
+        //useless code todo
+        else {
+            console.log(`Something went severly wrong with ${key} and`);// ${subject}`)
+            console.log('subjects:\n')
+            console.log(subject)
+            console.log('currentsubjects:\n')
+            console.log(currentsubjects)
+        }
     })
     console.log(`!! Processed ${Object.keys(subjects).length} subjects`)
     return {message: message, miscexams: miscexams}
 }
+
+/**
+ * Saves the complete report card to the database and sends a message to user if there is a change in the report card.
+ * Possibilities: grade got changed, ie: angemeldet -> bestanden; but also if for example 2.0 -> 1.0; exam got signed up; ...
+ * Missing: exam got removed, some other 'backwards' distinction
+ * 
+ * @param {*} subjects 
+ */
+function processGrades(subjects) {
+    let news = "";
+    let changes = "";
+    let currentsubjects = getGradesDB(CHAT_ID);
+
+    Object.keys(subjects).forEach( key => {
+        /**
+         * @param state: [angemeldet, bestanden, nicht bestanden, nicht erschienen, verschoben]
+         * @param title
+         * @param grade
+         */
+        let subject = subjects[key]
+        // Exam not in list yet
+        
+        // first time we see the exam
+        // todo coalesce state and grade
+        if (!currentsubjects[key]) {
+            console.log(`!! Adding ${key} to database - ${subject}`)
+            console.log(subject)
+            addGrade(CHAT_ID, key, subject);
+            news += `${subject.title}:\n` + ((subject.grade.length) > 0 ? `${subject.grade} ` : '') + `${subject.state}\n\n`
+        }
+
+        // Exam in list
+        else if (currentsubjects[key] || getGradesDB(CHAT_ID)[key]) { // try not to look up table all the time
+            // check pair-wise whether there is a change
+            if (currentsubjects[key].grade !== subject.grade || currentsubjects[key].state !== subject.state) {
+                console.log(`!! ${getLogTime()} Adding ${key} to database - ${subject}`)
+                addGrade(CHAT_ID, key, subject);
+                changes += `${subject.title}:\n` + ((subject.grade.length) > 0 ? `${subject.grade} ` : '') + `${subject.state}\n\n`
+            }
+        }
+        
+        //useless code todo
+        else {
+            console.log(`Something went severly wrong with ${key}`); // and ${subject}`);
+            console.log('subjects:\n');
+            console.log(subject);
+            console.log('currentsubjects:\n');
+            console.log(currentsubjects);
+        }
+    })
+    console.log(`!! ${getLogTime()} Processed ${Object.keys(subjects).length} grades`)
+
+    // todo show exact change in prop
+    let message = (news.length > 0 ? "New grades:\n" + news : "") + (changes.length > 0 ? "Changes in subjects:\n" + changes : "")
+    return message;
+}
+
 
 /**
  * Sends trimmed message to chatid
@@ -507,18 +585,39 @@ function addSubjects(chatid, prfnr) {
     // db.prepare('INSERT INTO subjects VALUES (@chatid, @prfnr)').run({chatid, prfnr})
 }
 
+function addGrade(chatid, prfnr, subjectinfo) {
+    const addstmt = db.prepare('INSERT OR REPLACE INTO reportcard (chatid, prfnr, title, state, grade) VALUES (?, ?, ?, ?, ?)');
+    if (prfnr === undefined || chatid  === undefined) console.log(`!!! ${getLogTime()} prfnr is undefined in addSubjects()`)
+    else addstmt.run(chatid, prfnr, subjectinfo.title, subjectinfo.state, subjectinfo.grade)
+}
+
 function fillReportCard(subjects) {
     return 0;
 }
 
 /**
- * Gets subjects associated with CHATID from database. Terrible naming, as getSubjectsFromTable() is a function as well. TODO
+ * Gets subjects associated with CHATID from database.
  * @param {string, number} chatid 
  * @returns [number, string] // todo
  */
-function getSubjects(chatid) {
+function getSubjectsDB(chatid) {
     return db.prepare('SELECT * FROM subjects WHERE chatid = @chatid').all({chatid}).map( row => row.prfnr)
 }
+
+/**
+ * Get the grades from DB (reportcard)
+ * @param {number} chatid 
+ * @returns {Object} {prfnr: {grade, state, title}} 
+*/
+function getGradesDB(chatid) {
+    return db.prepare('SELECT * FROM reportcard WHERE chatid = @chatid').all({chatid})
+        .reduce((acc, row) => {
+            acc[Number(row.prfnr)] = {grade: row.grade, state: row.state, title: row.title};
+            return acc;
+        }, {})
+
+}
+
 
 /**
  * 
